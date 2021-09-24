@@ -1,0 +1,484 @@
+---
+title: "Bayesian Learning Computer Lab 3"
+author: "bisku859 and gowku593"
+date: "5/12/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library("mvtnorm")
+library("MASS")
+library("tibble")
+library("dplyr")
+library(rstan)
+```
+
+# Assignment 1. Gibbs sampler for a normal model 
+
+The dataset rainfall.dat consists of daily records, from the beginning of 1948 to the end of 1983, of precipitation (rain or snow in units of 1/100 inch, and records of zero precipitation are excluded) at Snoqualmie Falls, Washington. Assume the natural log of the daily precipitation $\{y_1,...y_n\}$ are independent normally distributed . $lny_1,...ln y_n \mid \mu,\sigma^2\sim \mathcal{N}(\mu,\sigma^2)$, where both $\mu$ and $\sigma^2$ are unknown. 
+
+Let $\mu\sim\mathcal{N}(\mu_0,\tau_0^2)$ independently of $\sigma^2\sim Inv-\chi^2(v_0,\tau_0)$.
+
+a). Implement (code!) a Gibbs sampler that simulates from the joint posterior
+$p(\mu,\sigma^2\mid lny_1,...,y_n)$. The full conditional posteriors are given on the slides
+from Lecture 7. Evaluate the convergence of the Gibbs sampler by calculating the Inefficiency Factors (IFs) and plotting the trajectories of the sampled Markov chains.
+
+
+```{r, echo=T, eval=TRUE,fig.align='center',fig.height=4}
+
+data <-as.vector( read.table("rainfall.dat", sep = "", dec = ".")[,1])
+
+# set up   from lecture slide, 
+# chossing initial values 
+rho <- 0.9
+mu <- mean(log(data))
+sigma2 <-  var(log(data))
+nu0 <- 1
+tau02 <- 2
+mu0 <- 25
+sigma02 <- 5
+
+n <- length(data)
+xbar <- mean(log(data)) #or mu 
+
+# nu_n is given by nu_0+n
+
+nu_n <- nu0 +n
+
+
+# to draw  mu from full conditional posterior sigma^2, we draw from the scaled inverse chi square distribution. 
+# we  need to draw mu for  sigma^2, where taun^2 is given with a loop 
+
+mu_values <-c() # 
+sigma_values <-c()
+
+sigmasq <-1
+mu_draw<-NULL
+#prior-to-posterior mapping  (Lecture 1):
+for (i in 1:500){
+  w= (n/sigmasq)/((n/sigmasq)+(1/tau02)) 
+  mun = w*xbar +(1-w)*mu0               
+  
+  taun2 = 1/((n/sigmasq)+(1/tau02))   # reciprocal of 1/taun^2  
+  mu_draw = rnorm(n=1, mean = mun, sd= sqrt(taun2))
+  mu_values <- append(mu_values, mu_draw)
+  x = rchisq(n=1, df=nu_n )  # pick x values 
+  sigmasq = nu_n*(nu0*sigma02+sum((data-mu_draw)^2)/n+nu0)/x
+  sigma_values <- append(sigma_values,sigmasq)
+  
+}
+
+
+hist(mu_values,breaks = 30)
+hist(sigma_values,breaks = 30)
+
+plot(mu_values,sigma_values, type = "s", col="blue",main = "Plot: Mu vs Sigma Values")
+
+mu_con<-cumsum(mu_values)/seq_along(mu_values) 
+plot(mu_con,type = "o",col="red")
+sigma_con<-cumsum(sigma_values)/seq_along(sigma_values)
+plot(sigma_con,type = "o",col="blue")
+
+
+```
+
+It bascically represents the average moving mean of the mu and sigma values of the sample precipitations. The sampling method starts with a lot of fluctuations and therefore a initial burn-in period is recommended for collection of sample data corresponding to the districution.
+
+The above graphs of mu and sigma shows that the data is converging well afetr initial hiccups. These initial samples can be discarded as burn-in period for smooth observation/estimations.
+
+We feel that this kind of estimations is very useful for analysing and predicting varying data and one such example is weather data.
+
+
+Plot the following in one figure: 
+
+1) a histogram or kernel density estimate of the daily precipitation $\{y_1,...y_n\}$ 
+2) The resulting posterior predictive density $p(\tilde{y}\mid y_1,...,y_n)$ using the simulated posterior draws from (a). How well does the posterior predictive density agree with this data?
+
+
+
+
+```{r, echo=T, eval=TRUE,fig.align='center',fig.height=4}
+#i.) histogram or kernel density estimate of the daily precipitation 
+data2<-read.table("rainfall.dat")
+x <- as.matrix(log(data2))
+
+# Setting up the plot
+xGrid <- seq(min(x)-1*apply(x,2,sd),max(x)+1*apply(x,2,sd),length = 100)
+xGridMin <- min(xGrid)
+xGridMax <- max(xGrid)
+
+hist(x, breaks = 50, freq = FALSE, xlim = c(xGridMin,xGridMax), 
+     main = "Final fitted density")
+lines(xGrid, dnorm(xGrid, mean = mean(x), sd = apply(x,2,sd)), type = "l", lwd = 2, col = "blue")
+legend("topright", box.lty = 1, 
+       legend = c("Data histogram","Normal density"), 
+       col=c("black","blue"), lwd = 2)
+
+# ii) Posterior predictive density (posterior samples from a) to simulate the predictive density of y
+
+mu_samples<-mu_values
+sigma_samples<-sigma_values
+No_obs<-1000
+
+pred_dist <- function(mu_samples, sigma_samples, No_obs) {
+  output <- tibble(Sno = numeric(0),
+                    rt_pred = numeric(0))
+  for (i in 1:length(mu_samples)) {
+    mu <- mu_samples[i]
+    sigma <- sigma_samples[i]
+    output <- bind_rows(output ,
+      tibble( Sno = seq_len(No_obs),rt_pred = rnorm(No_obs, mu, sigma))
+    )
+  }
+  output 
+}
+
+pred_post_dist<-pred_dist(mu_samples, sigma_samples, No_obs)
+
+
+hist(pred_post_dist$rt_pred,main = "Posterior predictive density")
+```
+
+The histogram and the posterior density has been plotted above.  It fails to capture all the data points, especially the initial ones. However, it did capture the majority of the data points as observed in the histogram. 
+
+
+
+# 2. Metropolis Random Walk for Poisson regression
+
+## a)
+
+```{r, echo=T, eval=TRUE,fig.align='center',fig.height=4}
+Data<- read.table("eBayNumberOfBidderData.dat",header=TRUE)
+#head(data)
+#length(Data)
+# as per lecture codes 
+y <- as.vector(Data[,1]); # Data from the read.table function is a data frame.
+#Let's convert y and X to vector and matrix respectivelky.
+X <- as.matrix(Data[,2:10])
+covNames <- names(Data)[2:length(names(Data))]
+
+poisson_model <-glm(nBids~PowerSeller+VerifyID+Sealed+Minblem+MajBlem+LargNeg+LogBook+MinBidShare, 
+                    data=Data, family = poisson)
+coefficients(poisson_model)
+# Summary to check for most significant coefficients 
+summary(poisson_model)
+
+chooseCov <- c(1,3,4,6,8,9)
+sign_X <- X[,chooseCov] # choosen the most significant covariates 
+cat("The covariates that are significant are : \n",colnames(sign_X),sep = "\n") 
+#const is intercept
+
+```
+
+## b)
+
+The PDF for the Poisson distribution is given by 
+$\frac{\lambda^xe^{-\lambda}}{x!}$
+
+We estimate for $\lambda$ from the joint PDF
+$\Pi_{i=1}^{n}\frac{\lambda^{x_i}e^{-\lambda}}{x_i!}$ \
+
+Taking log , the value of $\lambda$ maximizes 
+$\log (\Pi_{i=1}^{n}\frac{\lambda^{x_i}e^{-\lambda}}{x_i!}) = \sum_{i=1}^{n}\log(\frac{\lambda^{x_i}e^{-\lambda}}{x_i!}) = \sum_{i=1}^n x_i\log(\lambda) - \sum_{i=1}^n \lambda - \sum_{i=1}^n \log (x_i!)$ \
+
+or, $=\log(\lambda)\sum_{i=1}^nx_i - n\lambda - \sum_{i=1}^n \log (x_i!)$ \
+
+Now, comparing with given equation, we can say that  $\lambda = exp(x_i'\beta)$ \
+
+or, $=x_i'\beta\sum_{i=1}^nx_i - nx_i'\beta - \sum_{i=1}^n \log (x_i!)$ \
+
+
+```{r, echo=T, eval=TRUE,fig.align='center',fig.height=4}
+
+
+# Priors are below : 
+Beta_prior = rep(0, 9) # mean prior
+Sigma_prior = 100 * solve(t(X) %*% X) # Sigma prior
+
+logPostPoisson = function(Beta, mu, Sigma_prior, X, y) {
+  p = length(Beta)
+  
+  # log of the likelihood
+  log.likelihood = sum(y * X %*% Beta- exp(X %*% Beta))
+  
+  # if likelihood is very large or very small, stear optim away
+  if (abs(log.likelihood) == Inf) log.likelihood = -20000;
+  
+  # log of the prior
+  log.prior = dmvnorm(Beta, mean = mu, sigma = Sigma_prior, log = TRUE)
+  
+  return(log.likelihood + log.prior)
+}
+
+
+# Optimize posterior of β given priors and data
+OptimResults = optim(Beta_prior, logPostPoisson, gr=NULL, 
+                   Beta_prior, Sigma_prior, X, y,
+                   method="BFGS", control=list(fnscale=-1), hessian=TRUE)
+
+postMode<-OptimResults$par # Beta hat 
+cat("\n  The Posterior Mode or Beta_hat : \n",postMode,"\n")
+postCov<--solve(OptimResults$hessian) # posterior Covariance Matrix , (posterior variance) 
+cat("\n The Posterior Covariance Matrix  : \n",postCov,"\n")
+
+
+```
+
+
+## c)
+
+
+```{r, echo=T, eval=TRUE,fig.align='center',fig.height=4}
+
+General_fun = function(nSamples, theta, c, logPostFunc, ...) {
+  # Setup
+  theta1 = theta
+  Sigma1 = c * postCov # obtained in b 
+  counter = 0
+  nPara = length(theta)
+  samples = matrix(NA, size, nPara)
+  
+  # loop
+  for(i in 1: size) {
+    # Sample from proposal distribution as theta2
+    theta2 = as.vector(rmvnorm(1, mean = theta1, sigma = Sigma1))
+    
+    # log posteriors
+    log_post_2 = logPostFunc(theta2, ...)
+    log_post_1= logPostFunc(theta1, ...)
+    
+    #  alpha
+    alpha = min(1, exp(log_post_2 - log_post_1))
+    
+    # selection of samples wrt alpha
+    u = runif(1)
+    if (u <= alpha){
+      theta1 = theta2
+      counter = counter + 1
+    }
+    
+    # Saving the samples 
+    if (i>0) samples[i,] = theta1
+  }
+  return(samples)
+}
+
+# Setup 
+c = 1
+size = 4000
+
+
+# Samples from posterior using metropolis
+Beta_samples = General_fun( size,postMode, c, logPostPoisson, Beta_prior, Sigma_prior, X, y)
+
+# Estimation of  parameters utilizing Beta_samples or posterior mean 
+postMode_mean = apply(Beta_samples, 2, mean)
+
+# Plot parameters 
+plot(rep(0, 9), ylim = c(-0.015, 0.015), col="blue",
+     xlab="Beta", ylab="Parameter difference", main="Parameter value of the different methods",type="o")
+points(poisson_model$coefficients-postMode, col="black",type="o")
+points(poisson_model$coefficients-postMode_mean, col="red",type="o")
+legend("bottomright", legend=c("Poisson model", "posterior mode", "posterior mean"), lwd=2,
+       col=c("blue", "black", "red"))
+
+# Plot posterior distribution of all Beta
+for(i in 1:9){
+  plot(density(Beta_samples[,i]), main=covNames[i], xlab=paste("Beta-",i), ylab="Density")
+}
+
+
+# Plot posterior distribution of all phi
+phis = exp(Beta_samples)
+for(i in 1:9){
+  plot(density(phis[,i]), main=covNames[i], xlab=paste("Phi-",i), ylab="Density")
+}
+
+
+
+
+
+
+```
+
+Looking at the above plot for parameters values of different methods, we can see that Poisson Model (or Glm model) and the posterior mode are very much in line and provides similar results as parameter values. On the other hand the posterior mean by MCMC method gives very uch different output(or parameters value) when compared with poisson and posterior mode. 
+
+Also, we plotted the density of all the  phi values to check on the convergence of MCMC .All of them seems to follow normal distributions. We could say that the posterior distributions looks good. 
+
+## d) 
+
+
+```{r, echo=T, eval=TRUE,fig.align='center',fig.height=4}
+
+
+# Given
+values = c(1, 1, 1, 1, 0, 1, 0, 1, 0.7)
+
+# sampling 
+Bid_samples = numeric()
+for(i in 1:size) {
+  Bid_samples[i] = rpois(1, exp(values %*% Beta_samples[i,]))
+}
+
+# Plot of prdictive distribution :
+barplot(table(Bid_samples))
+
+# probabily of no bidders in this new auction is given by :
+probab = sum(Bid_samples == 0) / size # 0.56
+
+cat("\n The Probability of no (zero) bidders in this new auction  : \n",probab,"\n")
+
+```
+
+
+
+# 3. Time series models in Stan 
+
+## a)
+
+```{r, echo=T, eval=TRUE,fig.align='center',fig.height=4 }
+
+
+# Given 
+mu<-20
+sigma2<-4
+T <-200
+
+# Phi 
+phi_seq<-seq(from=-1,to=1,length.out =10)
+
+# function 
+AR<-function(phi,T,mu,sigma2){
+x<-c()
+x[1]<-mu
+for(t in 2:T){
+x[t]<-mu+phi*(x[t-1]-mu)+rnorm(1,0,sqrt(sigma2))   
+}
+return(x)}
+
+# Data 
+result<-matrix(nrow = 200,ncol=10)
+for(k in 1:10){
+for (i in phi_seq){
+  result[,k]<-AR(phi=i,T,mu,sigma2)
+}}
+
+#Plot realizations 
+par(mfcol =c(2,2))
+for (i in phi_seq){
+  plot(AR(phi=i,T,mu,sigma2),type="l",main= paste("Plot \n phi =", i) )
+}
+
+```
+
+## b)
+
+
+
+```{r, echo=T, eval=TRUE,fig.align='center',fig.height=4 }
+
+
+# Simulation of two AR(1) processes with phi=0.3 and phi=0.9
+x1 = AR(phi=0.3,T, mu, sigma2)
+x2 = AR(phi=0.9,T ,mu, sigma2)
+
+#From stan user guide AR(1) model
+Stan_Model = 'data {
+  int<lower=0> N;
+  vector[N] x;
+}
+parameters {
+  real mu;
+  real phi;
+  real<lower=0> sigma;
+}
+model {
+  for (n in 2:N)
+    x[n] ~ normal(mu + phi * (x[n-1] - mu), sigma);
+}'
+
+# Implementation of Stan code that samples from the posterior of the three parameters 
+fit1 = stan(model_code=Stan_Model, data=list(x=x1, N=T))
+fit2 = stan(model_code=Stan_Model, data=list(x=x2, N=T))
+
+
+result1 = summary(fit1)
+result2 = summary(fit2 )
+
+# extract n_eff
+effective1 = result1$summary[,"n_eff"]
+effective2 = result2$summary[,"n_eff"]
+
+# posterior means
+post_mean1 = get_posterior_mean(fit1)
+post_mean2 = get_posterior_mean(fit2)
+
+# parameters extraction from the fit for both phi 0.3 and 0.9
+para1 = extract(fit1)
+para2 = extract(fit2)
+
+# 95% credible intervals
+interval = c(0.025,0.975)
+CI.mu1 <- apply(as.matrix(para1$mu), 2, quantile, probs=interval) 
+CI.mu2 <- apply(as.matrix(para2$mu), 2, quantile, probs=interval) 
+CI.phi1 <- apply(as.matrix(para1$phi), 2, quantile, probs=interval) 
+CI.phi2 <- apply(as.matrix(para2$phi), 2, quantile, probs=interval) 
+CI.sigma1 <- apply(as.matrix(para1$sigma), 2, quantile, probs=interval) 
+CI.sigma2 <- apply(as.matrix(para2$sigma), 2, quantile, probs=interval) 
+
+# Number of effective posterior samples 
+effective_mu1 = effective1["mu"] 
+effective_phi1 =effective1["phi"]
+effective_sigma1 = effective1["sigma"] 
+effectivef_mu2 = effective2["mu"] 
+effective_phi2 = effective2["phi"] 
+effective_sigma2 = effective2["sigma"] 
+
+# estimation of true values:
+
+
+# post mu, phi, sigma: 0.3
+cat("\n The True value estimations for phi =0.3 : \n")
+mu_post1 = post_mean1[1,5] 
+phi_post1 = post_mean1[2,5] 
+sigma_post1 = post_mean1[3,5] 
+cat("\n The True value estimations for phi =0.3 : \n mean :",mu_post1,"\n phi :",phi_post1,"\n sigma :",sigma_post1)
+
+# post mu, phi, sigma: 0.9
+
+mu_post2 = post_mean2[1,5] 
+phi_post2 = post_mean2[2,5] 
+sigma_post2 = post_mean2[3,5]
+cat("\n The True value estimations for phi =0.9 : \n mean :",mu_post2,"\n phi :",phi_post2,"\n sigma :",sigma_post2)
+
+```
+
+
+## ii) Joint Posterior density of of mu and phi for both data sets 
+
+```{r, echo=T, eval=TRUE,fig.align='center',fig.height=4,include=FALSE}
+
+
+# plot 
+
+plot(x=para1$mu, y=para1$phi,
+     xlab="mu", ylab="phi", main="Posterior density, AR(1) with phi=0.3")
+plot(x=para2$mu,y=para2$phi,
+     xlab="mu", ylab="phi", main="Posterior density, AR(1) with phi=0.9")
+
+
+```
+
+Looking at the above plot, we can say that 
+
+
+## Contribution :
+Biswas contributed majorly with Assignment # 1 and #2, report writing and overall trouble-shooting.
+Gowtham contributed majorly with Assignment #3.
+Both team members discussed on solution approach, expected outcomes, and revision for the submitted comments  of all the assignments.
+
+# Note : We have referred lecture notes, our group's previous submission, received comments analysis and  R -documentation 
+
+# Code Appendix
+```{r ref.label=knitr::all_labels(), echo = T, eval = F}
